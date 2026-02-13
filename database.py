@@ -29,6 +29,12 @@ c.execute('''CREATE TABLE IF NOT EXISTS knowledge_base
               link TEXT NOT NULL,
               tags TEXT,
               created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
+# Новая таблица для интересов
+c.execute('''CREATE TABLE IF NOT EXISTS interests
+             (id INTEGER PRIMARY KEY AUTOINCREMENT,
+              title TEXT NOT NULL,
+              active BOOLEAN DEFAULT 1,
+              created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
 conn.commit()
 
 def close_db():
@@ -176,3 +182,53 @@ def search_knowledge_base_simple(query: str) -> list:
             ORDER BY id DESC
         """, (f"%{query}%", f"%{query}%"))
         return c.fetchall()
+
+# ========== ИНТЕРЕСЫ ==========
+DEFAULT_INTERESTS = [
+    "Общение с заказчиками и выявление требований",
+    "Проектирование баз данных и сложные SQL-запросы",
+    "Моделирование бизнес-процессов (BPMN, UML)",
+    "Разработка и документирование REST API",
+    "Архитектура микросервисов и event-driven системы",
+    "Анализ данных и построение отчётов",
+    "Автоматизация тестирования и обеспечение качества",
+    "Управление проектами и командами",
+    "Облачные технологии (AWS, Azure)",
+    "Изучение новых технологий и исследования (R&D)"
+]
+
+def init_interests():
+    with db_lock:
+        c.execute("SELECT COUNT(*) FROM interests")
+        count = c.fetchone()[0]
+        if count == 0:
+            for title in DEFAULT_INTERESTS:
+                c.execute("INSERT INTO interests (title, active) VALUES (?, 1)", (title,))
+            conn.commit()
+            print("✅ Таблица interests заполнена начальными данными.")
+
+def get_all_interests():
+    with db_lock:
+        c.execute("SELECT id, title, active, created_at FROM interests ORDER BY id DESC")
+        return c.fetchall()
+
+def get_active_interests():
+    with db_lock:
+        c.execute("SELECT title FROM interests WHERE active = 1 ORDER BY id")
+        return [row[0] for row in c.fetchall()]
+
+def add_interest(title, active=True):
+    with db_lock:
+        c.execute("INSERT INTO interests (title, active) VALUES (?, ?)", (title, active))
+        conn.commit()
+        return c.lastrowid
+
+def update_interest_active(interest_id, active):
+    with db_lock:
+        c.execute("UPDATE interests SET active = ? WHERE id = ?", (active, interest_id))
+        conn.commit()
+
+def delete_interest(interest_id):
+    with db_lock:
+        c.execute("DELETE FROM interests WHERE id = ?", (interest_id,))
+        conn.commit()

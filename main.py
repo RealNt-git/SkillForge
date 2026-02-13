@@ -1,9 +1,11 @@
 import gradio as gr
 import traceback
 from database import (
-    init_prompts, init_knowledge_base, log_error,
+    init_prompts, init_knowledge_base, init_interests,
+    log_error,
     save_chat_message, get_chat_history, get_all_progress, get_error_logs,
-    get_all_knowledge_base, c, db_lock
+    get_all_knowledge_base, c, db_lock,
+    get_active_interests, get_all_interests
 )
 print("database loaded")
 from agents import chat_respond, validate_file, generate_plan_by_interests
@@ -14,13 +16,17 @@ from tests import (
 from progress import (
     show_progress, add_progress_ui, export_progress_csv, get_test_details
 )
-from admin import load_prompt, save_prompt_ui, shutdown_server, add_kb_item_ui
+from admin import (
+    load_prompt, save_prompt_ui, shutdown_server, add_kb_item_ui,
+    get_all_interests_ui, add_interest_ui, toggle_interest_active_ui, delete_interest_ui
+)
 
 print(f"✅ Используется Gradio версии: {gr.__version__}")
 
 # Инициализация БД
 init_prompts()
 init_knowledge_base()
+init_interests()
 
 # ========== CSS для прокрутки вывода плана ==========
 custom_css = """
@@ -68,29 +74,22 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
     with gr.Tab("🎯 Подбор плана по интересам"):
         gr.Markdown("### Выберите направления, которые вам интересны (можно отметить несколько)")
         
-        questions = [
-            "Общение с заказчиками и выявление требований",
-            "Проектирование баз данных и сложные SQL-запросы",
-            "Моделирование бизнес-процессов (BPMN, UML)",
-            "Разработка и документирование REST API",
-            "Архитектура микросервисов и event-driven системы",
-            "Анализ данных и построение отчётов",
-            "Автоматизация тестирования и обеспечение качества",
-            "Управление проектами и командами",
-            "Облачные технологии (AWS, Azure)",
-            "Изучение новых технологий и исследования (R&D)"
-        ]
-        
-        interests = gr.CheckboxGroup(choices=questions, label="Отметьте интересующие направления")
+        questions_state = gr.State(value=get_active_interests())
+        interests = gr.CheckboxGroup(choices=questions_state.value, label="Отметьте интересующие направления")
+        refresh_btn = gr.Button("🔄 Обновить список направлений", variant="secondary")
         generate_btn = gr.Button("🎯 Подобрать план", variant="primary")
-        # Используем Markdown с идентификатором для CSS
         output_plan = gr.Markdown(label="Ваш план развития", elem_id="plan-output")
+        
+        def refresh_interests():
+            new_list = get_active_interests()
+            return gr.update(choices=new_list), new_list
+        
+        refresh_btn.click(refresh_interests, outputs=[interests, questions_state])
         
         def generate_plan(selected):
             if not selected:
                 return "⚠️ Пожалуйста, выберите хотя бы одно направление."
-            # Функция уже импортирована глобально
-            plan = generate_plan_by_interests(selected, total_questions=len(questions))
+            plan = generate_plan_by_interests(selected, total_questions=len(questions_state.value))
             return plan
         
         generate_btn.click(generate_plan, inputs=interests, outputs=output_plan)
@@ -306,6 +305,182 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
         refresh_kb_btn.click(get_all_knowledge_base, [], kb_table)
 
         gr.Markdown("---")
+        gr.Markdown("### 🎯 Управление направлениями для подбора плана")
+        
+        # Состояние для хранения списка всех интересов (для выпадающего списка)
+        all_interests_state = gr.State(value=get_all_interests())
+        
+        # Функция для обновления выпадающего списка и таблицы
+        def refresh_all_interests():
+            data = get_all_interests() or []  # на случай None
+            # Создаём список кортежей (название, ID) для dropdown
+            choices = [(row[1], str(row[0])) for row in data if len(row) >= 2]
+            return gr.update(choices=choices, value=None), data
+        
+        # Первая строка: добавление нового направления
+        with gr.Row():
+            int_title = gr.Textbox(label="Название направления", placeholder="Введите интерес", scale=3)
+            int_active = gr.Checkbox(label="Активно", value=True, scale=1)
+            int_add_btn = gr.Button("➕ Добавить направление", scale=1)
+        int_status = gr.Textbox(label="", visible=False)
+        
+        # Таблица всех направлений
+        int_table = gr.Dataframe(
+            headers=["ID", "Название", "Активно", "Дата создания"],
+            value=get_all_interests_ui,
+            every=10
+        )
+        
+        # Вторая строка: редактирование и удаление
+        with gr.Row():
+            # Выпадающий список для выбора существующего направления
+            interest_selector = gr.Dropdown(
+                choices=[],  # будут заполнены при загрузке
+                label="Выберите направление для редактирования",
+                scale=3
+            )
+            # Чекбокс для установки активности
+            edit_active = gr.Checkbox(label="Активно", value=True, scale=1)
+            # Кнопка обновления активности
+            update_active_btn = gr.Button("🔄 Обновить активность", scale=1)
+        
+        with gr.Row():
+            # Кнопка копирования названия (будем использовать выбранное значение)
+            copy_title_btn = gr.Button("📋 Копировать название", scale=1)
+            # Кнопка удаления
+            delete_interest_btn = gr.Button("❌ Удалить направление", variant="stop", scale=1)
+        
+        # Кнопка обновления списка
+        refresh_int_btn = gr.Button("🔄 Обновить список направлений", variant="secondary")
+        
+        # При загрузке страницы инициализируем dropdown
+        demo.load(
+            fn=refresh_all_interests,
+            outputs=[interest_selector, all_interests_state]
+        )
+        
+        # При изменении выбранного элемента обновляем чекбокс активности
+        def on_interest_change(selected_id_str, all_data):
+            if not selected_id_str:
+                return False
+            try:
+                selected_id = int(selected_id_str)
+                for row in all_data:
+                    if row[0] == selected_id:
+                        return row[2]  # active
+            except:
+                pass
+            return False
+        
+        interest_selector.change(
+            fn=on_interest_change,
+            inputs=[interest_selector, all_interests_state],
+            outputs=edit_active
+        )
+        
+        # Обновление активности
+        def update_interest(selected_id_str, active):
+            if not selected_id_str:
+                return "⚠️ Сначала выберите направление!", gr.update(), gr.update()
+            try:
+                selected_id = int(selected_id_str)
+                toggle_interest_active_ui(selected_id, active)
+                new_data = get_all_interests()
+                choices = [(row[1], str(row[0])) for row in new_data]
+                return "✅ Активность обновлена!", gr.update(choices=choices, value=None), new_data
+            except Exception as e:
+                return f"❌ Ошибка: {e}", gr.update(), gr.update()
+        
+        update_active_btn.click(
+            fn=update_interest,
+            inputs=[interest_selector, edit_active],
+            outputs=[int_status, interest_selector, all_interests_state]
+        ).then(
+            fn=get_all_interests_ui,
+            outputs=int_table
+        )
+        
+        # Копирование названия в буфер
+        def get_selected_title(selected_id_str, all_data):
+            if not selected_id_str:
+                return ""
+            try:
+                selected_id = int(selected_id_str)
+                for row in all_data:
+                    if row[0] == selected_id:
+                        return row[1]
+            except:
+                pass
+            return ""
+        
+        copy_js = """
+        function copyTitle(title) {
+            navigator.clipboard.writeText(title);
+            return 'Скопировано!';
+        }
+        """
+        copy_title_btn.click(
+            fn=get_selected_title,
+            inputs=[interest_selector, all_interests_state],
+            outputs=[int_status],
+            js=copy_js
+        ).then(
+            fn=lambda: "✅ Название скопировано!",
+            outputs=int_status
+        )
+        
+        # Удаление направления
+        def delete_interest(selected_id_str):
+            if not selected_id_str:
+                return "⚠️ Сначала выберите направление!", gr.update(), gr.update()
+            try:
+                selected_id = int(selected_id_str)
+                delete_interest_ui(selected_id)
+                new_data = get_all_interests()
+                choices = [(row[1], str(row[0])) for row in new_data]
+                return "✅ Направление удалено!", gr.update(choices=choices, value=None), new_data
+            except Exception as e:
+                return f"❌ Ошибка: {e}", gr.update(), gr.update()
+        
+        delete_interest_btn.click(
+            fn=delete_interest,
+            inputs=[interest_selector],
+            outputs=[int_status, interest_selector, all_interests_state]
+        ).then(
+            fn=get_all_interests_ui,
+            outputs=int_table
+        )
+        
+        # Добавление нового направления
+        def add_int_and_refresh(title, active):
+            if not title:
+                return "⚠️ Название обязательно!", gr.update(), gr.update(), ""
+            try:
+                add_interest_ui(title, active)
+                new_data = get_all_interests()
+                choices = [(row[1], str(row[0])) for row in new_data]
+                return "✅ Направление добавлено!", gr.update(choices=choices, value=None), new_data, ""
+            except Exception as e:
+                return f"❌ Ошибка: {e}", gr.update(), gr.update(), title
+        
+        int_add_btn.click(
+            fn=add_int_and_refresh,
+            inputs=[int_title, int_active],
+            outputs=[int_status, interest_selector, all_interests_state, int_title]
+        ).then(
+            fn=get_all_interests_ui,
+            outputs=int_table
+        )
+        
+        refresh_int_btn.click(
+            fn=refresh_all_interests,
+            outputs=[interest_selector, all_interests_state]
+        ).then(
+            fn=get_all_interests_ui,
+            outputs=int_table
+        )
+
+        gr.Markdown("---")
         gr.Markdown("### 🚨 Лог ошибок приложения")
         error_table = gr.Dataframe(
             headers=["Время", "Тип", "Сообщение", "Traceback"],
@@ -342,7 +517,7 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
         table_selector = gr.Dropdown(
             choices=[
                 "progress", "agent_prompts", "error_logs", "test_results",
-                "chat_history", "test_answers", "knowledge_base"
+                "chat_history", "test_answers", "knowledge_base", "interests"
             ],
             label="Выберите таблицу"
         )

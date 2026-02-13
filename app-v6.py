@@ -17,10 +17,14 @@ from threading import Lock
 
 # ========== УНИВЕРСАЛЬНАЯ РАБОТА С ЧАТОМ (КОРТЕЖНЫЙ ФОРМАТ) ==========
 def add_chat_message(history, role, content):
+    """
+    Добавляет сообщение в историю чата в формате Gradio 6.x (словари).
+    """
     history.append({"role": role, "content": content})
     return history
 
 def clear_chat():
+    """Очистка истории чата."""
     return []
 
 # ========== ПРОВЕРКА ЗАВИСИМОСТЕЙ ==========
@@ -65,7 +69,7 @@ if MISSING_MODULES:
     print("Для полной функциональности выполните: pip install " + " ".join(MISSING_MODULES))
 
 # ========== БАЗА ДАННЫХ ==========
-db_lock = Lock()
+db_lock = Lock()  # блокировка для потокобезопасности
 conn = sqlite3.connect("skillforge.db", check_same_thread=False)
 c = conn.cursor()
 
@@ -79,12 +83,14 @@ c.execute('''CREATE TABLE IF NOT EXISTS test_results
              (user_id TEXT, topic TEXT, score INTEGER, total INTEGER, date TEXT)''')
 conn.commit()
 
+# Закрытие соединения с БД при завершении приложения
 def close_db():
     conn.close()
     print("✅ Соединение с БД закрыто корректно")
 
 atexit.register(close_db)
 
+# Промпты по умолчанию
 default_prompts = {
     "plan_agent": "Ты HR-аналитик. Составь план развития для {grade}. Учти текущий уровень и цели.",
     "validator": "Оцени ответ на вопрос: {question}. Текст ответа: {content}. Дай краткий вердикт и рекомендацию.",
@@ -158,7 +164,7 @@ def get_error_logs(limit=50):
 
 # ========== ДЕКОРАТОР ДЛЯ ЛОГИРОВАНИЯ ОШИБОК ==========
 def error_logged(func):
-    @wraps(func)
+    @wraps(func)  # сохраняет метаданные функции
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
@@ -239,10 +245,12 @@ def transcribe_audio(audio_path):
         return f"Ошибка распознавания: {e}"
 
 def text_to_speech(text, lang="ru"):
+    """Создаёт временный аудиофайл с речью. Файл будет удалён ОС при перезагрузке."""
     if gTTS is None:
         return None
     try:
         tts = gTTS(text=text, lang=lang)
+        # Используем временный файл, чтобы не засорять директорию
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
         temp_file.close()
         tts.save(temp_file.name)
@@ -378,12 +386,14 @@ def run_test(user_id, topic, answers):
 
 # ========== GRADIO ИНТЕРФЕЙС ==========
 def chat_respond(message, history):
+    """Обработка сообщения чата."""
     if "план" in message.lower():
         response = plan_agent(message)
     elif "найди" in message.lower() or "ресурс" in message.lower() or "статья" in message.lower():
         response = search_agent(message)
     else:
         response = "Я могу: составить план развития, найти учебные материалы, проверить файл, провести голосовое собеседование. Выберите вкладку."
+    
     return response
 
 def file_verification(file, task_desc):
@@ -397,14 +407,18 @@ def file_verification(file, task_desc):
         return f"Ошибка чтения файла: {e}"
 
 def voice_chat_respond(audio, history):
+    """Голосовой чат."""
     try:
         text = transcribe_audio(audio)
         if text.startswith("Ошибка") or text.startswith("⚠️"):
             return history, None
+        
         bot_msg = chat_respond(text, history)
         audio_path = text_to_speech(bot_msg)
+        
         history = add_chat_message(history, "user", text)
         history = add_chat_message(history, "assistant", bot_msg)
+        
         return history, audio_path
     except Exception as e:
         tb = traceback.format_exc()
@@ -420,6 +434,7 @@ def export_progress_csv():
     return output.getvalue()
 
 def copy_error_to_clipboard(error_text):
+    # Функция-заглушка, реальное копирование выполняется через JS в интерфейсе
     return None
 
 # ========== ПОСТРОЕНИЕ ИНТЕРФЕЙСА ==========
@@ -428,12 +443,13 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
     gr.Markdown("Векторный поиск, голосовое общение, тесты, админ-панель с логом ошибок.")
     # ----- Чат-тьютор -----
     with gr.Tab("💬 Чат-тьютор"):
-        chatbot = gr.Chatbot(value=[])
+        chatbot = gr.Chatbot(value=[])  # Явно указываем формат
         msg = gr.Textbox(placeholder="Напишите: составь план для junior / найди статьи по sql")
         clear = gr.Button("Очистить")
         def respond(message, chat_history):
             try:
                bot_msg = chat_respond(message, chat_history)
+               # Добавляем сообщения в формате словарей
                chat_history.append({"role": "user", "content": message})
                chat_history.append({"role": "assistant", "content": bot_msg})
                return "", chat_history
@@ -477,51 +493,71 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
             user_id_test = gr.Textbox(label="Ваш Email", placeholder="analyst@company.ru")
             topic_selector = gr.Dropdown(choices=["SQL", "BPMN", "REST"], label="Выберите тему")
             reset_test_btn = gr.Button("🔄 Сбросить тест", variant="secondary")
+        questions_state = gr.State([])
+        answers_state = gr.State([])
 
-        # Состояния
-        current_q_index = gr.State(0)
-        score = gr.State(0)
+        def start_test(topic):
+            try:
+                qs = test_questions.get(topic, [])
+                return qs, [None] * len(qs)
+            except Exception as e:
+                tb = traceback.format_exc()
+                log_error(type(e).__name__, str(e), tb)
+                return [], []
 
-        # Элементы интерфейса
+        topic_selector.change(start_test, topic_selector, [questions_state, answers_state])
+
         question_html = gr.HTML()
         options = gr.Radio(choices=[], label="Выберите ответ")
         submit_answer = gr.Button("Ответить")
         test_result = gr.Textbox(label="Результат")
 
-        # Функция загрузки вопроса
+        current_q_index = gr.State(0)
+        score = gr.State(0)
+
         def load_question(topic, idx):
             try:
                 qs = test_questions.get(topic, [])
                 if idx < len(qs):
                     q = qs[idx]
-                    return f"**Вопрос {idx+1}:** {q['question']}", q['options'], idx
+                    return (
+                        f"**Вопрос {idx+1}:** {q['question']}",
+                        gr.update(choices=q['options'], value=None),
+                        idx
+                    )
                 else:
-                    return "Тест завершён! Нажмите 'Сбросить тест' для нового теста.", [], idx
+                    return (
+                        "Тест завершён! Нажмите 'Сбросить тест' для нового теста.",
+                        gr.update(choices=[], value=None),
+                        idx
+                    )
             except Exception as e:
                 tb = traceback.format_exc()
                 log_error(type(e).__name__, str(e), tb)
-                return "Ошибка загрузки вопроса. Попробуйте сбросить тест.", [], idx
+                return (
+                    "Ошибка загрузки вопроса. Попробуйте сбросить тест.",
+                    gr.update(choices=[], value=None),
+                    idx
+                )
 
-        # При смене темы: сбрасываем индекс и счёт, загружаем первый вопрос
-        def change_topic(topic):
+        topic_selector.change(lambda t: load_question(t, 0), topic_selector, [question_html, options, current_q_index])
+
+        def reset_test(topic):
+            """Сбрасывает тест: индекс в 0, счёт в 0, загружает первый вопрос, очищает результат."""
             try:
-                # Сброс индекса и счёта
-                new_idx = 0
-                new_score = 0
-                q_text, opts, _ = load_question(topic, 0)
-                return new_idx, new_score, q_text, opts, ""  # очищаем результат
+                q_text, opts_update, _ = load_question(topic, 0)
+                return 0, 0, q_text, opts_update, ""
             except Exception as e:
                 tb = traceback.format_exc()
                 log_error(type(e).__name__, str(e), tb)
-                return 0, 0, "Ошибка загрузки темы.", [], ""
+                return 0, 0, "Ошибка сброса теста.", gr.update(choices=[], value=None), ""
 
-        topic_selector.change(
-            change_topic,
-            topic_selector,
+        reset_test_btn.click(
+            reset_test,
+            [topic_selector],
             [current_q_index, score, question_html, options, test_result]
         )
 
-        # Проверка ответа
         def check_answer(topic, idx, selected, current_score, user_email):
             try:
                 qs = test_questions.get(topic, [])
@@ -531,45 +567,31 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
                         current_score += 1
                         feedback = "✅ Верно!"
                     else:
-                        correct_answer = qs[idx]["options"][correct]
-                        feedback = f"❌ Неверно. Правильный ответ: {correct_answer}"
+                        feedback = f"❌ Неверно. Правильный ответ: {qs[idx]['options'][correct]}"
                     next_idx = idx + 1
                     if next_idx < len(qs):
-                        q_text, opts, _ = load_question(topic, next_idx)
-                        return feedback, current_score, next_idx, q_text, opts
+                        q_text, opts_update, _ = load_question(topic, next_idx)
+                        return feedback, current_score, next_idx, q_text, opts_update
                     else:
                         save_test_result(user_email, topic, current_score, len(qs))
-                        return f"🎉 Тест завершён! Результат: {current_score}/{len(qs)}. Сохранено.", current_score, next_idx, "", []
-                return "Ошибка: неверный индекс вопроса.", current_score, idx, "", []
+                        return (
+                            f"🎉 Тест завершён! Результат: {current_score}/{len(qs)}. Сохранено.",
+                            current_score,
+                            next_idx,
+                            "",
+                            gr.update(choices=[], value=None)
+                        )
+                return "Ошибка: неверный индекс вопроса.", current_score, idx, "", gr.update(choices=[], value=None)
             except Exception as e:
                 tb = traceback.format_exc()
                 log_error(type(e).__name__, str(e), tb)
-                return f"Ошибка при проверке ответа: {e}", current_score, idx, "", []
+                return f"Ошибка при проверке ответа: {e}", current_score, idx, "", gr.update(choices=[], value=None)
 
         submit_answer.click(
             check_answer,
             [topic_selector, current_q_index, options, score, user_id_test],
             [test_result, score, current_q_index, question_html, options]
         )
-
-        # Сброс теста
-        def reset_test(topic):
-            try:
-                new_idx = 0
-                new_score = 0
-                q_text, opts, _ = load_question(topic, 0)
-                return new_idx, new_score, q_text, opts, ""  # очищаем результат
-            except Exception as e:
-                tb = traceback.format_exc()
-                log_error(type(e).__name__, str(e), tb)
-                return 0, 0, "Ошибка сброса теста.", [], ""
-
-        reset_test_btn.click(
-            reset_test,
-            [topic_selector],
-            [current_q_index, score, question_html, options, test_result]
-        )
-
     # ----- Мой прогресс -----
     with gr.Tab("📊 Мой прогресс"):
         with gr.Row():
@@ -617,6 +639,7 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
         error_text_to_copy = gr.Textbox(label="Текст ошибки для копирования", lines=2)
         copy_btn = gr.Button("📋 Копировать в буфер")
         copy_status = gr.Textbox(label="Статус")
+        
         copy_btn.click(
             None,
             [error_text_to_copy],

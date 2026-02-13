@@ -1,9 +1,9 @@
-from database import get_prompt, error_logged
+from database import get_prompt, error_logged, save_weekly_plan, save_llm_dialogue
 from search import search_resources
-from llm import call_llm  # <-- новый импорт
+from llm import call_llm
 import traceback
+import re
 
-# Эта функция будет импортирована в main.py для chat_respond
 def chat_respond(message, history):
     if "план" in message.lower():
         return plan_agent(message)
@@ -15,26 +15,16 @@ def chat_respond(message, history):
 @error_logged
 def plan_agent(user_input: str) -> str:
     prompt_template = get_prompt("plan_agent")
-    
-    # Определяем грейд из запроса
     if "junior" in user_input.lower():
         grade = "Junior"
     elif "middle" in user_input.lower():
         grade = "Middle"
     else:
         grade = "General"
-    
-    # Формируем полный промпт для LLM
     full_prompt = prompt_template.format(grade=grade)
-    # Добавляем исходный запрос пользователя для контекста
     full_prompt += f"\n\nЗапрос пользователя: {user_input}"
-    
-    # Пытаемся получить ответ от LLM
     llm_response = call_llm(full_prompt, system_prompt="Ты — опытный HR-аналитик и карьерный консультант. Отвечай на русском языке.")
-    
-    # Если LLM вернул ошибку или недоступен, используем статический план
     if llm_response.startswith("⚠️") or llm_response.startswith("❌"):
-        # Статический план (как было раньше)
         if grade == "Junior":
             plan = """
 📚 **Неделя 1:** Основы SQL (SELECT, JOIN, агрегация) — тренажёр SQL-EX  
@@ -58,7 +48,6 @@ def plan_agent(user_input: str) -> str:
 """
         return f"**Промпт агента:** {prompt_template.format(grade=grade)}\n\n{plan}\n\n*Примечание: использован статический план, так как AI-помощник временно недоступен.*"
     else:
-        # Возвращаем ответ от LLM
         return f"**Промпт агента:** {prompt_template.format(grade=grade)}\n\n**AI-рекомендация:**\n{llm_response}"
 
 @error_logged
@@ -93,7 +82,6 @@ def validate_file(content: str, filename: str, question: str) -> str:
 
 @error_logged
 def search_agent(query: str) -> str:
-    # Импортируем внутри, чтобы избежать циклических зависимостей
     from search import search_resources
     prompt = get_prompt("search_agent")
     resources = search_resources(query)
@@ -133,53 +121,53 @@ def interview_agent(topic: str, grade: str) -> str:
         ]
     return f"**Тема:** {topic} ({grade})\n\n**Вопросы:**\n" + "\n".join([f"{i+1}. {q}" for i, q in enumerate(questions)])
 
+def extract_section(text, header):
+    pattern = re.compile(rf"{re.escape(header)}\s*(.*?)(?=\n\*\*|\n$)", re.DOTALL | re.IGNORECASE)
+    match = pattern.search(text)
+    if match:
+        return match.group(1).strip()
+    return ""
+
 @error_logged
-def generate_plan_by_interests(interests: list, total_questions: int = 10) -> str:
-    """
-    Генерирует план развития на основе выбранных интересов.
-    """
-    count = len(interests)
+def generate_weekly_plans(interests: list, grade: str, user_email: str) -> list:
+    if not user_email:
+        raise ValueError("Email пользователя обязателен")
     interests_text = "\n".join([f"- {interest}" for interest in interests])
-
-    # Более компактный промпт
-    if count >= 5:
+    results = []
+    for week in range(1, 5):
         prompt = (
-            f"Системный аналитик выбрал {count} направлений (список ниже). "
-            f"Составь краткий 4-недельный план развития, ориентированный на эти интересы.\n\n"
-            f"Интересы:\n{interests_text}\n\n"
-            "Требования к ответу:\n"
-            "- Только план, без лишних вступлений и пояснений.\n"
-            "- По 1-2 предложения на неделю.\n"
-            "- Для каждой недели укажи ключевую тему и 1-2 примера ресурсов (книги, курсы).\n"
-            "- Уложись в 500 слов.\n"
+            f"Ты — карьерный консультант для системных аналитиков.\n"
+            f"Уровень аналитика: {grade}.\n"
+            f"Выбранные направления:\n{interests_text}\n\n"
+            f"Составь план обучения на **неделю {week}** из 4-недельного курса. "
+            f"Учти уровень {grade} и выбранные направления.\n"
+            f"Твой ответ должен содержать:\n"
+            f"1. Краткое описание целей недели (2-3 предложения).\n"
+            f"2. Ключевые определения (список терминов, которые нужно усвоить).\n"
+            f"3. Ключевые теги (например: #sql, #bpmn).\n"
+            f"4. Ключевые знания (что именно должен знать и уметь аналитик после этой недели).\n\n"
+            f"Формат ответа:\n"
+            f"**Неделя {week}**\n"
+            f"**Цели:** ...\n"
+            f"**Определения:** термин1, термин2, ...\n"
+            f"**Теги:** #тег1, #тег2, ...\n"
+            f"**Знания:** ...\n"
+            f"Ответ должен быть кратким и укладываться в 1000 токенов."
         )
-    else:
-        prompt = (
-            f"Системный аналитик выбрал только {count} направлений из {total_questions}:\n"
-            f"{interests_text}\n\n"
-            "Этого недостаточно для узкой специализации. Предложи альтернативный 4-недельный план развития, "
-            "который охватывает базовые навыки системного аналитика, но с акцентом на выбранные интересы.\n"
-            "Формат: кратко, по 1-2 предложения на неделю, с указанием тем и примеров ресурсов.\n"
+        system_prompt = "Ты опытный методист. Отвечай строго по формату, на русском языке."
+        response = call_llm(prompt, system_prompt)
+        save_llm_dialogue(user_email, prompt, response)
+        key_defs = extract_section(response, "Определения:")
+        key_tags = extract_section(response, "Теги:")
+        key_knowledge = extract_section(response, "Знания:")
+        save_weekly_plan(
+            user_email=user_email,
+            grade=grade,
+            week_number=week,
+            content=response,
+            key_defs=key_defs,
+            key_tags=key_tags,
+            key_knowledge=key_knowledge
         )
-
-    system_prompt = (
-        "Ты опытный HR-аналитик. Отвечай кратко и по делу. "
-        "Используй русский язык."
-    )
-
-    from llm import call_llm
-    llm_response = call_llm(prompt, system_prompt)
-
-    # Логируем finish_reason (нужно добавить в llm.py)
-    if llm_response.startswith("⚠️") or llm_response.startswith("❌") or llm_response.startswith("Ошибка"):
-        default_plan = """
-📌 **Базовый план (4 недели)**
-
-**Неделя 1:** Основы системного анализа (SDLC, сбор требований).  
-**Неделя 2:** Моделирование (BPMN, UML) – практика.  
-**Неделя 3:** SQL и базы данных (SELECT, JOIN) – тренажёры.  
-**Неделя 4:** Soft skills и коммуникация.
-"""
-        return f"**AI-рекомендация временно недоступна. Базовый план:**\n{default_plan}"
-    else:
-        return f"**AI-рекомендация:**\n{llm_response}"
+        results.append((week, response, key_defs, key_tags, key_knowledge))
+    return results

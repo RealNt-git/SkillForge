@@ -1,0 +1,313 @@
+import gradio as gr
+import traceback
+from database import (
+    init_prompts, init_knowledge_base, log_error,
+    save_chat_message, get_chat_history, get_all_progress, get_error_logs,
+    get_all_knowledge_base, c, db_lock
+)
+print("database loaded")
+from agents import chat_respond, validate_file
+from voice import transcribe_audio, text_to_speech, add_chat_message
+from tests import (
+    test_questions, start_test, load_question, reset_test, check_answer
+)
+from progress import (
+    show_progress, add_progress_ui, export_progress_csv, get_test_details   
+)
+from admin import load_prompt, save_prompt_ui, shutdown_server, add_kb_item_ui
+
+print(f"✅ Используется Gradio версии: {gr.__version__}")
+
+# Инициализация БД
+init_prompts()
+init_knowledge_base()
+
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+def file_verification(file, task_desc):
+    try:
+        with open(file.name, 'r', encoding='utf-8') as f:
+            content = f.read()
+        filename = file.name.split("\\")[-1]
+        return validate_file(content, filename, task_desc)
+    except Exception as e:
+        log_error("FileVerification", str(e), traceback.format_exc())
+        return f"Ошибка чтения файла: {e}"
+
+def get_table_data(table_name):
+    with db_lock:
+        c.execute(f"SELECT * FROM {table_name} ORDER BY rowid DESC LIMIT 100")
+        rows = c.fetchall()
+        c.execute(f"PRAGMA table_info({table_name})")
+        columns = [col[1] for col in c.fetchall()]
+        return rows, columns
+
+def show_table(table_name):
+    data, headers = get_table_data(table_name)
+    if data:
+        return gr.update(value=data, headers=headers)
+    else:
+        return gr.update(value=[["Нет данных"]], headers=["Сообщение"])
+
+# ========== ИНТЕРФЕЙС ==========
+with gr.Blocks(title="SkillForge Analyst") as demo:
+    gr.Markdown("# 🤖 SkillForge Analyst — AI-наставник системных аналитиков")
+    gr.Markdown("Векторный поиск, голосовое общение, тесты, админ-панель с логом ошибок.")
+
+    # ----- Чат-тьютор -----
+    with gr.Tab("💬 Чат-тьютор"):
+        chatbot = gr.Chatbot(value=[])
+        with gr.Row():
+            user_email_chat = gr.Textbox(label="Ваш Email", placeholder="analyst@company.ru", scale=3)
+            msg = gr.Textbox(placeholder="Напишите сообщение...", scale=5)
+        clear = gr.Button("Очистить")
+
+        def respond(message, chat_history, user_email):
+            try:
+                bot_msg = chat_respond(message, chat_history)
+                chat_history.append({"role": "user", "content": message})
+                chat_history.append({"role": "assistant", "content": bot_msg})
+                if user_email:
+                    save_chat_message(user_email, "user", message)
+                    save_chat_message(user_email, "assistant", bot_msg)
+                return "", chat_history, user_email
+            except Exception as e:
+                tb = traceback.format_exc()
+                log_error(type(e).__name__, str(e), tb)
+                chat_history.append({"role": "user", "content": message})
+                chat_history.append({"role": "assistant", "content": "Ошибка. Администратор уведомлён."})
+                return "", chat_history, user_email
+
+        msg.submit(respond, [msg, chatbot, user_email_chat], [msg, chatbot, user_email_chat])
+        
+        def clear_all():
+            return [], "", None
+        
+        clear.click(clear_all, None, [chatbot, msg, user_email_chat], queue=False)
+
+    # ----- Голосовое собеседование -----
+    with gr.Tab("🎤 Голосовое собеседование"):
+        gr.Markdown("Нажмите на микрофон и задайте вопрос голосом. Ответ будет озвучен.")
+        with gr.Row():
+            user_email_voice = gr.Textbox(label="Ваш Email", placeholder="analyst@company.ru", scale=3)
+            audio_input = gr.Audio(sources=["microphone", "upload"], type="filepath", scale=5)
+        with gr.Row():
+            voice_chatbot = gr.Chatbot(label="Диалог", value=[])
+            audio_output = gr.Audio(label="Ответ", type="filepath", autoplay=True)
+        voice_btn = gr.Button("Отправить голос")
+
+        def voice_respond(audio, history, user_email):
+            try:
+                text = transcribe_audio(audio)
+                if text.startswith("Ошибка") or text.startswith("⚠️"):
+                    return history, None, user_email
+                bot_msg = chat_respond(text, history)
+                audio_path = text_to_speech(bot_msg)
+                history = add_chat_message(history, "user", text)
+                history = add_chat_message(history, "assistant", bot_msg)
+                if user_email:
+                    save_chat_message(user_email, "user", text)
+                    save_chat_message(user_email, "assistant", bot_msg)
+                return history, audio_path, user_email
+            except Exception as e:
+                tb = traceback.format_exc()
+                log_error(type(e).__name__, str(e), tb)
+                return history, None, user_email
+
+        voice_btn.click(
+            voice_respond,
+            [audio_input, voice_chatbot, user_email_voice],
+            [voice_chatbot, audio_output, user_email_voice]
+        )
+
+    # ----- Проверка артефактов -----
+    with gr.Tab("📁 Проверка артефактов"):
+        gr.Markdown("Загрузите SQL (.sql), BPMN (.bpmn) или текстовое описание.")
+        file_input = gr.File(label="Файл")
+        task_desc = gr.Textbox(label="Что нужно было сделать? (описание задачи)")
+        check_btn = gr.Button("Проверить")
+        output = gr.Textbox(label="Результат проверки", lines=8)
+        check_btn.click(file_verification, [file_input, task_desc], output)
+
+    # ----- Тестирование -----
+    with gr.Tab("📝 Тестирование"):
+        gr.Markdown("### Проверьте свои знания")
+        with gr.Row():
+            user_id_test = gr.Textbox(label="Ваш Email", placeholder="analyst@company.ru")
+            topic_selector = gr.Dropdown(choices=["SQL", "BPMN", "REST"], label="Выберите тему")
+            reset_test_btn = gr.Button("🔄 Сбросить тест", variant="secondary")
+        questions_state = gr.State([])
+        answers_state = gr.State([])
+
+        topic_selector.change(start_test, topic_selector, [questions_state, answers_state])
+
+        question_html = gr.HTML()
+        options = gr.Radio(choices=[], label="Выберите ответ")
+        submit_answer = gr.Button("Ответить")
+        test_result = gr.Textbox(label="Результат")
+
+        current_q_index = gr.State(0)
+        score = gr.State(0)
+
+        topic_selector.change(lambda t: load_question(t, 0), topic_selector, [question_html, options, current_q_index])
+
+        reset_test_btn.click(
+            reset_test,
+            [topic_selector],
+            [current_q_index, score, question_html, options, test_result]
+        )
+
+        submit_answer.click(
+            check_answer,
+            [topic_selector, current_q_index, options, score, user_id_test],
+            [test_result, score, current_q_index, question_html, options]
+        )
+
+    # ----- Мой прогресс -----
+    with gr.Tab("📊 Мой прогресс"):
+        with gr.Row():
+            user_id_progress = gr.Textbox(label="Email сотрудника", placeholder="analyst@company.ru")
+            show_btn = gr.Button("Показать активность")
+
+        gr.Markdown("### 📝 История чата")
+        chat_history_display = gr.Dataframe(
+            headers=["Роль", "Сообщение", "Дата"],
+            row_count=10,
+            column_count=3  # вместо col_count
+        )
+
+        gr.Markdown("### 📊 Детализация тестов")
+        test_details_display = gr.Dataframe(
+            headers=["Тема", "Вопрос", "Ваш ответ", "Результат", "Дата"],
+            row_count=10,
+            column_count=5  # вместо col_count
+        )
+
+        gr.Markdown("### 🏆 Мои достижения")
+        achievements = gr.Dataframe(headers=["Навык", "Статус", "Дата"], row_count=5, column_count=3)
+
+        def show_full_progress(user_email):
+            if not user_email:
+                return (
+                    [["Нет записей", "", ""]],
+                    [["Нет записей", "", "", "", ""]],
+                    [["Нет записей", "", ""]]
+                )
+            chat_data = get_chat_history(user_email, 20)
+            if not chat_data:
+                chat_data = [["Нет записей", "", ""]]
+            test_data = get_test_details(user_email, test_questions, 20)
+            if not test_data:
+                test_data = [["Нет записей", "", "", "", ""]]
+            prog_data = show_progress(user_email)
+            return chat_data, test_data, prog_data
+
+        show_btn.click(
+            show_full_progress,
+            [user_id_progress],
+            [chat_history_display, test_details_display, achievements]
+        )
+
+        gr.Markdown("---\n**Добавить новое достижение:**")
+        with gr.Row():
+            new_user = gr.Textbox(label="Email")
+            new_skill = gr.Textbox(label="Навык")
+            new_status = gr.Dropdown(["Изучено", "В процессе", "Запланировано"], label="Статус")
+            add_btn = gr.Button("Добавить")
+            add_status = gr.Textbox(label="")
+        add_btn.click(add_progress_ui, [new_user, new_skill, new_status], add_status)
+
+        gr.Markdown("---\n**Командный прогресс**")
+        team_btn = gr.Button("Показать всю команду")
+        team_table = gr.Dataframe(headers=["Email", "Навык", "Статус", "Дата"])
+        team_btn.click(get_all_progress, [], team_table)
+
+        export_btn = gr.Button("📥 Экспорт в CSV")
+        export_file = gr.File()
+        export_btn.click(lambda: export_progress_csv(), [], export_file)
+
+    # ----- Администрирование -----
+    with gr.Tab("⚙️ Администрирование"):
+        gr.Markdown("### Редактирование промптов агентов")
+        agent_selector = gr.Dropdown(
+            choices=["plan_agent", "validator", "search_agent", "interview_agent"],
+            label="Выберите агента"
+        )
+        current_prompt = gr.Textbox(label="Текущий промпт", lines=5, interactive=False)
+        new_prompt = gr.Textbox(label="Новый промпт", lines=5, placeholder="Введите новый текст промпта...")
+        save_btn = gr.Button("💾 Сохранить изменения")
+        save_status = gr.Textbox(label="Статус")
+        agent_selector.change(load_prompt, agent_selector, current_prompt)
+        save_btn.click(save_prompt_ui, [agent_selector, new_prompt], save_status)
+
+        gr.Markdown("---")
+        gr.Markdown("### 📚 Управление базой знаний")
+        with gr.Row():
+            kb_title = gr.Textbox(label="Название", placeholder="Введите название ресурса")
+            kb_link = gr.Textbox(label="Ссылка", placeholder="https://...")
+            kb_tags = gr.Textbox(label="Теги (через запятую)", placeholder="sql, junior")
+            kb_add_btn = gr.Button("➕ Добавить ресурс")
+        kb_status = gr.Textbox(label="", visible=False)
+
+        kb_table = gr.Dataframe(
+            headers=["ID", "Название", "Ссылка", "Теги", "Дата создания"],
+            value=get_all_knowledge_base,
+            every=10
+        )
+        refresh_kb_btn = gr.Button("🔄 Обновить список")
+
+        kb_add_btn.click(
+            add_kb_item_ui,
+            [kb_title, kb_link, kb_tags],
+            [kb_status, kb_table]
+        )
+
+        refresh_kb_btn.click(get_all_knowledge_base, [], kb_table)
+
+        gr.Markdown("---")
+        gr.Markdown("### 🚨 Лог ошибок приложения")
+        error_table = gr.Dataframe(
+            headers=["Время", "Тип", "Сообщение", "Traceback"],
+            value=get_error_logs,
+            every=10
+        )
+        refresh_btn = gr.Button("🔄 Обновить лог")
+        refresh_btn.click(get_error_logs, [], error_table)
+
+        error_text_to_copy = gr.Textbox(label="Текст ошибки для копирования", lines=2)
+        copy_btn = gr.Button("📋 Копировать в буфер")
+        copy_status = gr.Textbox(label="Статус")
+        copy_btn.click(
+            None,
+            [error_text_to_copy],
+            copy_status,
+            js="(text) => { navigator.clipboard.writeText(text); return 'Скопировано!'; }"
+        )
+
+        gr.Markdown("---")
+        gr.Markdown("### 🛑 Управление сервером")
+        gr.Markdown("При нажатии приложение будет остановлено.")
+        shutdown_btn = gr.Button("🛑 Остановить сервер", variant="stop")
+        shutdown_btn.click(
+            fn=shutdown_server,
+            inputs=[],
+            outputs=[],
+            js="() => { if(!confirm('Вы уверены?')) throw new Error('Отменено'); }"
+        )
+
+    # ----- Новая вкладка: Просмотр БД -----
+    with gr.Tab("📊 База данных"):
+        gr.Markdown("### Просмотр содержимого таблиц")
+        table_selector = gr.Dropdown(
+            choices=[
+                "progress", "agent_prompts", "error_logs", "test_results",
+                "chat_history", "test_answers", "knowledge_base"
+            ],
+            label="Выберите таблицу"
+        )
+        view_btn = gr.Button("Показать")
+        table_display = gr.Dataframe()
+
+        view_btn.click(show_table, table_selector, table_display)
+
+if __name__ == "__main__":
+    demo.launch(theme=gr.themes.Soft())

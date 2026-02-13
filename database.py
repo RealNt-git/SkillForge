@@ -29,11 +29,27 @@ c.execute('''CREATE TABLE IF NOT EXISTS knowledge_base
               link TEXT NOT NULL,
               tags TEXT,
               created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
-# Новая таблица для интересов
 c.execute('''CREATE TABLE IF NOT EXISTS interests
              (id INTEGER PRIMARY KEY AUTOINCREMENT,
               title TEXT NOT NULL,
               active BOOLEAN DEFAULT 1,
+              created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
+# Таблицы для недельных планов и диалогов LLM
+c.execute('''CREATE TABLE IF NOT EXISTS weekly_plans
+             (id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_email TEXT NOT NULL,
+              grade TEXT NOT NULL,
+              week_number INTEGER NOT NULL,
+              content TEXT NOT NULL,
+              key_definitions TEXT,
+              key_tags TEXT,
+              key_knowledge TEXT,
+              created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
+c.execute('''CREATE TABLE IF NOT EXISTS llm_dialogues
+             (id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_email TEXT NOT NULL,
+              prompt TEXT NOT NULL,
+              response TEXT NOT NULL,
               created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
 conn.commit()
 
@@ -232,3 +248,51 @@ def delete_interest(interest_id):
     with db_lock:
         c.execute("DELETE FROM interests WHERE id = ?", (interest_id,))
         conn.commit()
+
+# ========== НОВЫЕ ФУНКЦИИ ДЛЯ НЕДЕЛЬНЫХ ПЛАНОВ ==========
+def save_weekly_plan(user_email, grade, week_number, content, key_defs="", key_tags="", key_knowledge=""):
+    with db_lock:
+        c.execute("""
+            INSERT INTO weekly_plans (user_email, grade, week_number, content, key_definitions, key_tags, key_knowledge)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (user_email, grade, week_number, content, key_defs, key_tags, key_knowledge))
+        conn.commit()
+        return c.lastrowid
+
+def get_weekly_plans(user_email):
+    with db_lock:
+        c.execute("""
+            SELECT week_number, content, key_definitions, key_tags, key_knowledge, created_at
+            FROM weekly_plans
+            WHERE user_email=?
+            ORDER BY week_number
+        """, (user_email,))
+        return c.fetchall()
+
+# ========== НОВЫЕ ФУНКЦИИ ДЛЯ ДИАЛОГОВ С LLM ==========
+def save_llm_dialogue(user_email, prompt, response):
+    with db_lock:
+        c.execute("""
+            INSERT INTO llm_dialogues (user_email, prompt, response)
+            VALUES (?, ?, ?)
+        """, (user_email, prompt, response))
+        conn.commit()
+
+def get_llm_dialogues(user_email=None, limit=50):
+    with db_lock:
+        if user_email:
+            c.execute("""
+                SELECT prompt, response, created_at
+                FROM llm_dialogues
+                WHERE user_email=?
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (user_email, limit))
+        else:
+            c.execute("""
+                SELECT user_email, prompt, response, created_at
+                FROM llm_dialogues
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (limit,))
+        return c.fetchall()

@@ -6,7 +6,9 @@ from database import log_error
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "stepfun/step-3.5-flash:free"  # бесплатная модель
+# Можно попробовать другую бесплатную модель, например:
+# "google/gemini-2.0-flash-exp:free" (большой контекст)
+DEFAULT_MODEL = "stepfun/step-3.5-flash:free"
 
 def call_llm(prompt: str, system_prompt: str = None) -> str:
     if not OPENROUTER_API_KEY:
@@ -17,28 +19,28 @@ def call_llm(prompt: str, system_prompt: str = None) -> str:
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        # Некоторые модели требуют HTTP-Referer (можно указать любой)
         "HTTP-Referer": "https://skillforge.local",
         "X-Title": "SkillForge Analyst"
     }
-    
+
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
+    # Устанавливаем max_tokens, но провайдер может его игнорировать или ограничивать
     payload = {
         "model": DEFAULT_MODEL,
         "messages": messages,
         "temperature": 0.7,
-        "max_tokens": 1000
+        "max_tokens": 1000  # Увеличено с 1000, но не слишком большое значение
     }
 
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] LLM запрос: {prompt[:200]}...")
 
     try:
         response = requests.post(OPENROUTER_API_URL, headers=headers, json=payload, timeout=60)
-        
+
         if response.status_code != 200:
             error_body = response.text
             error_msg = f"❌ HTTP {response.status_code}: {error_body[:200]}"
@@ -48,7 +50,17 @@ def call_llm(prompt: str, system_prompt: str = None) -> str:
 
         data = response.json()
         answer = data['choices'][0]['message']['content']
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] LLM ответ: {answer[:200]}...")
+        finish_reason = data['choices'][0].get('finish_reason')
+
+        # Логируем причину завершения
+        if finish_reason == 'length':
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ⚠️ Ответ обрезан из-за достижения лимита токенов (finish_reason=length)")
+        elif finish_reason == 'stop':
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ Ответ завершён штатно (finish_reason=stop)")
+        else:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🔍 Ответ завершён с причиной: {finish_reason}")
+
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] LLM ответ (первые 200 символов): {answer[:200]}...")
         return answer
 
     except requests.exceptions.Timeout:

@@ -6,13 +6,13 @@ from database import (
     get_all_knowledge_base, c, db_lock
 )
 print("database loaded")
-from agents import chat_respond, validate_file, generate_plan_by_interests 
+from agents import chat_respond, validate_file, generate_plan_by_interests
 from voice import transcribe_audio, text_to_speech, add_chat_message
 from tests import (
     test_questions, start_test, load_question, reset_test, check_answer
 )
 from progress import (
-    show_progress, add_progress_ui, export_progress_csv, get_test_details   
+    show_progress, add_progress_ui, export_progress_csv, get_test_details
 )
 from admin import load_prompt, save_prompt_ui, shutdown_server, add_kb_item_ui
 
@@ -21,6 +21,17 @@ print(f"✅ Используется Gradio версии: {gr.__version__}")
 # Инициализация БД
 init_prompts()
 init_knowledge_base()
+
+# ========== CSS для прокрутки вывода плана ==========
+custom_css = """
+#plan-output {
+    max-height: 500px;
+    overflow-y: auto;
+    border: 1px solid #ccc;
+    padding: 10px;
+    border-radius: 5px;
+}
+"""
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def file_verification(file, task_desc):
@@ -53,12 +64,10 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
     gr.Markdown("# 🤖 SkillForge Analyst — AI-наставник системных аналитиков")
     gr.Markdown("Векторный поиск, голосовое общение, тесты, админ-панель с логом ошибок.")
    
-   
     # ----- Новая вкладка: Подбор плана по интересам -----
     with gr.Tab("🎯 Подбор плана по интересам"):
         gr.Markdown("### Выберите направления, которые вам интересны (можно отметить несколько)")
         
-        # Список вопросов
         questions = [
             "Общение с заказчиками и выявление требований",
             "Проектирование баз данных и сложные SQL-запросы",
@@ -72,24 +81,19 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
             "Изучение новых технологий и исследования (R&D)"
         ]
         
-        # Чекбокс-группа
         interests = gr.CheckboxGroup(choices=questions, label="Отметьте интересующие направления")
-        
-        # Кнопка и результат
         generate_btn = gr.Button("🎯 Подобрать план", variant="primary")
-        output_plan = gr.Markdown(label="Ваш план развития")
+        # Используем Markdown с идентификатором для CSS
+        output_plan = gr.Markdown(label="Ваш план развития", elem_id="plan-output")
         
         def generate_plan(selected):
             if not selected:
                 return "⚠️ Пожалуйста, выберите хотя бы одно направление."
-            # Вызываем функцию из agents
-            from agents import generate_plan_by_interests
+            # Функция уже импортирована глобально
             plan = generate_plan_by_interests(selected, total_questions=len(questions))
             return plan
         
         generate_btn.click(generate_plan, inputs=interests, outputs=output_plan)
-
-
 
     # ----- Чат-тьютор -----
     with gr.Tab("💬 Чат-тьютор"):
@@ -210,14 +214,14 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
         chat_history_display = gr.Dataframe(
             headers=["Роль", "Сообщение", "Дата"],
             row_count=10,
-            column_count=3  # вместо col_count
+            column_count=3
         )
 
         gr.Markdown("### 📊 Детализация тестов")
         test_details_display = gr.Dataframe(
             headers=["Тема", "Вопрос", "Ваш ответ", "Результат", "Дата"],
             row_count=10,
-            column_count=5  # вместо col_count
+            column_count=5
         )
 
         gr.Markdown("### 🏆 Мои достижения")
@@ -348,4 +352,4 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
         view_btn.click(show_table, table_selector, table_display)
 
 if __name__ == "__main__":
-    demo.launch(theme=gr.themes.Soft())
+    demo.launch(theme=gr.themes.Soft(), css=custom_css)

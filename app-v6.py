@@ -15,17 +15,10 @@ from contextlib import redirect_stdout, redirect_stderr
 from functools import wraps
 from threading import Lock
 
-# ========== УНИВЕРСАЛЬНАЯ РАБОТА С ЧАТОМ (КОРТЕЖНЫЙ ФОРМАТ) ==========
+# ========== УНИВЕРСАЛЬНАЯ РАБОТА С ЧАТОМ ==========
 def add_chat_message(history, role, content):
-    """
-    Добавляет сообщение в историю чата в формате Gradio 6.x (словари).
-    """
     history.append({"role": role, "content": content})
     return history
-
-def clear_chat():
-    """Очистка истории чата."""
-    return []
 
 # ========== ПРОВЕРКА ЗАВИСИМОСТЕЙ ==========
 MISSING_MODULES = []
@@ -69,10 +62,11 @@ if MISSING_MODULES:
     print("Для полной функциональности выполните: pip install " + " ".join(MISSING_MODULES))
 
 # ========== БАЗА ДАННЫХ ==========
-db_lock = Lock()  # блокировка для потокобезопасности
+db_lock = Lock()
 conn = sqlite3.connect("skillforge.db", check_same_thread=False)
 c = conn.cursor()
 
+# Существующие таблицы
 c.execute('''CREATE TABLE IF NOT EXISTS progress
              (user_id TEXT, skill TEXT, status TEXT, date TEXT)''')
 c.execute('''CREATE TABLE IF NOT EXISTS agent_prompts
@@ -81,13 +75,18 @@ c.execute('''CREATE TABLE IF NOT EXISTS error_logs
              (timestamp TEXT, error_type TEXT, message TEXT, traceback TEXT)''')
 c.execute('''CREATE TABLE IF NOT EXISTS test_results
              (user_id TEXT, topic TEXT, score INTEGER, total INTEGER, date TEXT)''')
+
+# Новые таблицы для детализации активности
+c.execute('''CREATE TABLE IF NOT EXISTS chat_history
+             (user_id TEXT, role TEXT, content TEXT, date TEXT)''')
+c.execute('''CREATE TABLE IF NOT EXISTS test_answers
+             (user_id TEXT, topic TEXT, question_index INTEGER, 
+              selected TEXT, correct BOOLEAN, date TEXT)''')
 conn.commit()
 
-# Закрытие соединения с БД при завершении приложения
 def close_db():
     conn.close()
     print("✅ Соединение с БД закрыто корректно")
-
 atexit.register(close_db)
 
 # Промпты по умолчанию
@@ -119,6 +118,7 @@ def save_prompt_ui(agent_name, new_prompt):
     update_prompt(agent_name, new_prompt)
     return f"Промпт для {agent_name} сохранён."
 
+# ========== ФУНКЦИИ ДЛЯ ПРОГРЕССА ==========
 def save_progress(user_id, skill, status):
     with db_lock:
         c.execute("INSERT INTO progress VALUES (?, ?, ?, ?)",
@@ -145,12 +145,60 @@ def add_progress(user_id, skill, status):
     save_progress(user_id, skill, status)
     return f"Достижение '{skill}' добавлено!"
 
+# ========== ФУНКЦИИ ДЛЯ ТЕСТОВ ==========
 def save_test_result(user_id, topic, score, total):
     with db_lock:
         c.execute("INSERT INTO test_results VALUES (?, ?, ?, ?, ?)",
                   (user_id, topic, score, total, datetime.now().strftime("%Y-%m-%d %H:%M")))
         conn.commit()
 
+def save_test_answer(user_id, topic, question_index, selected, correct):
+    with db_lock:
+        c.execute("INSERT INTO test_answers VALUES (?, ?, ?, ?, ?, ?)",
+                  (user_id, topic, question_index, selected, correct, datetime.now().strftime("%Y-%m-%d %H:%M")))
+        conn.commit()
+
+def get_test_details(user_id, limit=20):
+    with db_lock:
+        c.execute("""
+            SELECT topic, question_index, selected, correct, date 
+            FROM test_answers 
+            WHERE user_id=? 
+            ORDER BY date DESC 
+            LIMIT ?
+        """, (user_id, limit))
+        rows = c.fetchall()
+        # Преобразуем для отображения: topic, вопрос, ответ, результат (+), дата
+        result = []
+        for row in rows:
+            topic, q_idx, selected, correct, date = row
+            # Получим текст вопроса из test_questions (глобально)
+            try:
+                q_text = test_questions[topic][q_idx]["question"]
+            except:
+                q_text = f"Вопрос {q_idx+1}"
+            result.append([topic, q_text, selected, "✅" if correct else "❌", date])
+        return result
+
+# ========== ФУНКЦИИ ДЛЯ ИСТОРИИ ЧАТА ==========
+def save_chat_message(user_id, role, content):
+    with db_lock:
+        c.execute("INSERT INTO chat_history VALUES (?, ?, ?, ?)",
+                  (user_id, role, content, datetime.now().strftime("%Y-%m-%d %H:%M")))
+        conn.commit()
+
+def get_chat_history(user_id, limit=20):
+    with db_lock:
+        c.execute("""
+            SELECT role, content, date 
+            FROM chat_history 
+            WHERE user_id=? 
+            ORDER BY date DESC 
+            LIMIT ?
+        """, (user_id, limit))
+        return c.fetchall()
+
+# ========== ЛОГИРОВАНИЕ ОШИБОК ==========
 def log_error(error_type, message, tb):
     with db_lock:
         c.execute("INSERT INTO error_logs VALUES (?, ?, ?, ?)",
@@ -162,9 +210,9 @@ def get_error_logs(limit=50):
         c.execute("SELECT timestamp, error_type, message, traceback FROM error_logs ORDER BY timestamp DESC LIMIT ?", (limit,))
         return c.fetchall()
 
-# ========== ДЕКОРАТОР ДЛЯ ЛОГИРОВАНИЯ ОШИБОК ==========
+# ========== ДЕКОРАТОР ==========
 def error_logged(func):
-    @wraps(func)  # сохраняет метаданные функции
+    @wraps(func)
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
@@ -174,7 +222,7 @@ def error_logged(func):
             raise e
     return wrapper
 
-# ========== ВЕКТОРНАЯ БАЗА ЗНАНИЙ (CHROMADB) ==========
+# ========== ВЕКТОРНАЯ БАЗА ЗНАНИЙ ==========
 def init_vector_db():
     if chromadb is None or sentence_transformers is None:
         return None
@@ -245,12 +293,10 @@ def transcribe_audio(audio_path):
         return f"Ошибка распознавания: {e}"
 
 def text_to_speech(text, lang="ru"):
-    """Создаёт временный аудиофайл с речью. Файл будет удалён ОС при перезагрузке."""
     if gTTS is None:
         return None
     try:
         tts = gTTS(text=text, lang=lang)
-        # Используем временный файл, чтобы не засорять директорию
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
         temp_file.close()
         tts.save(temp_file.name)
@@ -372,29 +418,14 @@ test_questions = {
     ]
 }
 
-def run_test(user_id, topic, answers):
-    questions = test_questions.get(topic, [])
-    if not questions:
-        return "Тема не найдена.", 0, 0
-    score = 0
-    for i, q in enumerate(questions):
-        if i < len(answers) and answers[i] == q["answer"]:
-            score += 1
-    total = len(questions)
-    save_test_result(user_id, topic, score, total)
-    return f"✅ Вы набрали {score} из {total}. Результат сохранён.", score, total
-
 # ========== GRADIO ИНТЕРФЕЙС ==========
 def chat_respond(message, history):
-    """Обработка сообщения чата."""
     if "план" in message.lower():
-        response = plan_agent(message)
+        return plan_agent(message)
     elif "найди" in message.lower() or "ресурс" in message.lower() or "статья" in message.lower():
-        response = search_agent(message)
+        return search_agent(message)
     else:
-        response = "Я могу: составить план развития, найти учебные материалы, проверить файл, провести голосовое собеседование. Выберите вкладку."
-    
-    return response
+        return "Я могу: составить план развития, найти учебные материалы, проверить файл, провести голосовое собеседование. Выберите вкладку."
 
 def file_verification(file, task_desc):
     try:
@@ -407,18 +438,14 @@ def file_verification(file, task_desc):
         return f"Ошибка чтения файла: {e}"
 
 def voice_chat_respond(audio, history):
-    """Голосовой чат."""
     try:
         text = transcribe_audio(audio)
         if text.startswith("Ошибка") or text.startswith("⚠️"):
             return history, None
-        
         bot_msg = chat_respond(text, history)
         audio_path = text_to_speech(bot_msg)
-        
         history = add_chat_message(history, "user", text)
         history = add_chat_message(history, "assistant", bot_msg)
-        
         return history, audio_path
     except Exception as e:
         tb = traceback.format_exc()
@@ -434,50 +461,82 @@ def export_progress_csv():
     return output.getvalue()
 
 def copy_error_to_clipboard(error_text):
-    # Функция-заглушка, реальное копирование выполняется через JS в интерфейсе
     return None
 
 # ========== ПОСТРОЕНИЕ ИНТЕРФЕЙСА ==========
 with gr.Blocks(title="SkillForge Analyst") as demo:
     gr.Markdown("# 🤖 SkillForge Analyst — AI-наставник системных аналитиков")
     gr.Markdown("Векторный поиск, голосовое общение, тесты, админ-панель с логом ошибок.")
+
     # ----- Чат-тьютор -----
     with gr.Tab("💬 Чат-тьютор"):
-        chatbot = gr.Chatbot(value=[])  # Явно указываем формат
+        chatbot = gr.Chatbot(value=[])
         msg = gr.Textbox(placeholder="Напишите: составь план для junior / найди статьи по sql")
         clear = gr.Button("Очистить")
-        def respond(message, chat_history):
+
+        def respond(message, chat_history, user_email):  # добавили user_email
             try:
-               bot_msg = chat_respond(message, chat_history)
-               # Добавляем сообщения в формате словарей
-               chat_history.append({"role": "user", "content": message})
-               chat_history.append({"role": "assistant", "content": bot_msg})
-               return "", chat_history
+                bot_msg = chat_respond(message, chat_history)
+                chat_history.append({"role": "user", "content": message})
+                chat_history.append({"role": "assistant", "content": bot_msg})
+                # Сохраняем в историю чата
+                if user_email:
+                    save_chat_message(user_email, "user", message)
+                    save_chat_message(user_email, "assistant", bot_msg)
+                return "", chat_history
             except Exception as e:
-               tb = traceback.format_exc()
-               log_error(type(e).__name__, str(e), tb)
-               chat_history.append({"role": "user", "content": message})
-               chat_history.append({"role": "assistant", "content": "Ошибка. Администратор уведомлён."})
-               return "", chat_history
-        msg.submit(respond, [msg, chatbot], [msg, chatbot])
+                tb = traceback.format_exc()
+                log_error(type(e).__name__, str(e), tb)
+                chat_history.append({"role": "user", "content": message})
+                chat_history.append({"role": "assistant", "content": "Ошибка. Администратор уведомлён."})
+                return "", chat_history
+
+        # Добавляем поле для email в чате, чтобы идентифицировать пользователя
+        with gr.Row():
+            user_email_chat = gr.Textbox(label="Ваш Email", placeholder="analyst@company.ru", scale=3)
+            msg = gr.Textbox(placeholder="Напишите сообщение...", scale=5)
+        msg.submit(respond, [msg, chatbot, user_email_chat], [msg, chatbot])
         
         def clear_all():
-            return [], ""
+            return [], "", None
         
-        clear.click(clear_all, None, [chatbot, msg], queue=False)
+        clear.click(clear_all, None, [chatbot, msg, user_email_chat], queue=False)
+
     # ----- Голосовое собеседование -----
     with gr.Tab("🎤 Голосовое собеседование"):
         gr.Markdown("Нажмите на микрофон и задайте вопрос голосом. Ответ будет озвучен.")
-        audio_input = gr.Audio(sources=["microphone", "upload"], type="filepath")
+        with gr.Row():
+            user_email_voice = gr.Textbox(label="Ваш Email", placeholder="analyst@company.ru", scale=3)
+            audio_input = gr.Audio(sources=["microphone", "upload"], type="filepath", scale=5)
         with gr.Row():
             voice_chatbot = gr.Chatbot(label="Диалог", value=[])
             audio_output = gr.Audio(label="Ответ", type="filepath", autoplay=True)
         voice_btn = gr.Button("Отправить голос")
+
+        def voice_respond(audio, history, user_email):
+            try:
+                text = transcribe_audio(audio)
+                if text.startswith("Ошибка") or text.startswith("⚠️"):
+                    return history, None, user_email
+                bot_msg = chat_respond(text, history)
+                audio_path = text_to_speech(bot_msg)
+                history = add_chat_message(history, "user", text)
+                history = add_chat_message(history, "assistant", bot_msg)
+                if user_email:
+                    save_chat_message(user_email, "user", text)
+                    save_chat_message(user_email, "assistant", bot_msg)
+                return history, audio_path, user_email
+            except Exception as e:
+                tb = traceback.format_exc()
+                log_error(type(e).__name__, str(e), tb)
+                return history, None, user_email
+
         voice_btn.click(
-            voice_chat_respond,
-            [audio_input, voice_chatbot],
-            [voice_chatbot, audio_output]
+            voice_respond,
+            [audio_input, voice_chatbot, user_email_voice],
+            [voice_chatbot, audio_output, user_email_voice]
         )
+
     # ----- Проверка артефактов -----
     with gr.Tab("📁 Проверка артефактов"):
         gr.Markdown("Загрузите SQL (.sql), BPMN (.bpmn) или текстовое описание.")
@@ -486,6 +545,7 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
         check_btn = gr.Button("Проверить")
         output = gr.Textbox(label="Результат проверки", lines=8)
         check_btn.click(file_verification, [file_input, task_desc], output)
+
     # ----- Тестирование -----
     with gr.Tab("📝 Тестирование"):
         gr.Markdown("### Проверьте свои знания")
@@ -543,7 +603,6 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
         topic_selector.change(lambda t: load_question(t, 0), topic_selector, [question_html, options, current_q_index])
 
         def reset_test(topic):
-            """Сбрасывает тест: индекс в 0, счёт в 0, загружает первый вопрос, очищает результат."""
             try:
                 q_text, opts_update, _ = load_question(topic, 0)
                 return 0, 0, q_text, opts_update, ""
@@ -563,11 +622,18 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
                 qs = test_questions.get(topic, [])
                 if idx < len(qs):
                     correct = qs[idx]["answer"]
+                    selected_text = selected if selected else ""
+                    is_correct = False
                     if selected is not None and qs[idx]["options"].index(selected) == correct:
                         current_score += 1
                         feedback = "✅ Верно!"
+                        is_correct = True
                     else:
                         feedback = f"❌ Неверно. Правильный ответ: {qs[idx]['options'][correct]}"
+                        is_correct = False
+                    # Сохраняем детали ответа
+                    if user_email:
+                        save_test_answer(user_email, topic, idx, selected_text, is_correct)
                     next_idx = idx + 1
                     if next_idx < len(qs):
                         q_text, opts_update, _ = load_question(topic, next_idx)
@@ -592,13 +658,55 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
             [topic_selector, current_q_index, options, score, user_id_test],
             [test_result, score, current_q_index, question_html, options]
         )
+
     # ----- Мой прогресс -----
     with gr.Tab("📊 Мой прогресс"):
         with gr.Row():
             user_id_progress = gr.Textbox(label="Email сотрудника", placeholder="analyst@company.ru")
-            show_btn = gr.Button("Показать достижения")
+            show_btn = gr.Button("Показать активность")
+
+        # История чата
+        gr.Markdown("### 📝 История чата")
+        chat_history_display = gr.Dataframe(
+            headers=["Роль", "Сообщение", "Дата"],
+            row_count=10,
+            col_count=(3, "fixed")
+        )
+
+        # Детали тестов
+        gr.Markdown("### 📊 Детализация тестов")
+        test_details_display = gr.Dataframe(
+            headers=["Тема", "Вопрос", "Ваш ответ", "Результат", "Дата"],
+            row_count=10,
+            col_count=(5, "fixed")
+        )
+
+        # Достижения
+        gr.Markdown("### 🏆 Мои достижения")
         achievements = gr.Dataframe(headers=["Навык", "Статус", "Дата"], row_count=5)
-        show_btn.click(show_progress, user_id_progress, achievements)
+
+        def show_full_progress(user_email):
+            if not user_email:
+                return (
+                    [["Нет записей", "", ""]],
+                    [["Нет записей", "", "", "", ""]],
+                    [["Нет записей", "", ""]]
+                )
+            chat_data = get_chat_history(user_email, 20)
+            if not chat_data:
+                chat_data = [["Нет записей", "", ""]]
+            test_data = get_test_details(user_email, 20)
+            if not test_data:
+                test_data = [["Нет записей", "", "", "", ""]]
+            prog_data = show_progress(user_email)
+            return chat_data, test_data, prog_data
+
+        show_btn.click(
+            show_full_progress,
+            [user_id_progress],
+            [chat_history_display, test_details_display, achievements]
+        )
+
         gr.Markdown("---\n**Добавить новое достижение:**")
         with gr.Row():
             new_user = gr.Textbox(label="Email")
@@ -607,13 +715,16 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
             add_btn = gr.Button("Добавить")
             add_status = gr.Textbox(label="")
         add_btn.click(add_progress, [new_user, new_skill, new_status], add_status)
+
         gr.Markdown("---\n**Командный прогресс**")
         team_btn = gr.Button("Показать всю команду")
         team_table = gr.Dataframe(headers=["Email", "Навык", "Статус", "Дата"])
         team_btn.click(get_all_progress, [], team_table)
+
         export_btn = gr.Button("📥 Экспорт в CSV")
         export_file = gr.File()
         export_btn.click(lambda: export_progress_csv(), [], export_file)
+
     # ----- Администрирование -----
     with gr.Tab("⚙️ Администрирование"):
         gr.Markdown("### Редактирование промптов агентов")
@@ -627,6 +738,7 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
         save_status = gr.Textbox(label="Статус")
         agent_selector.change(load_prompt, agent_selector, current_prompt)
         save_btn.click(save_prompt_ui, [agent_selector, new_prompt], save_status)
+
         gr.Markdown("---")
         gr.Markdown("### 🚨 Лог ошибок приложения")
         error_table = gr.Dataframe(
@@ -636,19 +748,21 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
         )
         refresh_btn = gr.Button("🔄 Обновить лог")
         refresh_btn.click(get_error_logs, [], error_table)
+
         error_text_to_copy = gr.Textbox(label="Текст ошибки для копирования", lines=2)
         copy_btn = gr.Button("📋 Копировать в буфер")
         copy_status = gr.Textbox(label="Статус")
-        
         copy_btn.click(
             None,
             [error_text_to_copy],
             copy_status,
             js="(text) => { navigator.clipboard.writeText(text); return 'Скопировано!'; }"
         )
+
         gr.Markdown("---")
         gr.Markdown("### 📚 Управление базой знаний")
         gr.Markdown(f"Сейчас база содержит {len(KNOWLEDGE_BASE)} записей.")
+
         gr.Markdown("---")
         gr.Markdown("### 🛑 Управление сервером")
         gr.Markdown("При нажатии приложение будет остановлено.")
@@ -664,6 +778,7 @@ with gr.Blocks(title="SkillForge Analyst") as demo:
             outputs=[],
             js="() => { if(!confirm('Вы уверены?')) throw new Error('Отменено'); }"
         )
+
 # ========== ЗАПУСК ==========
 if __name__ == "__main__":
     demo.launch(theme=gr.themes.Soft())

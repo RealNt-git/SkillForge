@@ -1,4 +1,5 @@
 import traceback
+from datetime import datetime  # <-- добавлено для временных меток
 from database import db_lock, c, conn, log_error, get_all_knowledge_base, add_knowledge_item, search_knowledge_base_simple, init_knowledge_base
 
 # Ensure knowledge base is initialized
@@ -22,6 +23,7 @@ if chromadb_available:
         )
         try:
             vector_collection = client.get_collection("analyst_skills", embedding_function=ef)
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ ChromaDB коллекция загружена")
         except:
             vector_collection = client.create_collection("analyst_skills", embedding_function=ef)
             # Load from knowledge_base
@@ -37,6 +39,7 @@ if chromadb_available:
                 ids.append(f"doc_{i}")
             if documents:
                 vector_collection.add(documents=documents, metadatas=metadatas, ids=ids)
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ ChromaDB коллекция создана и заполнена {len(rows)} ресурсами")
     except Exception as e:
         log_error("VectorDBInit", str(e), traceback.format_exc())
         vector_collection = None
@@ -44,7 +47,7 @@ if chromadb_available:
 def search_resources(query: str) -> str:
     if vector_collection is not None:
         try:
-            results = vector_collection.query(query_texts=[query], n_results=5)
+            results = vector_collection.query(query_texts=[query], n_results=5) # <-- n_results количество записей в результате поиска
             output = []
             for i in range(len(results['documents'][0])):
                 title = results['metadatas'][0][i]['title']
@@ -60,3 +63,18 @@ def search_resources(query: str) -> str:
         return "\n".join([f"- [{title}]({link})" for title, link in rows])
     else:
         return "Ничего не найдено. Попробуйте изменить запрос."
+
+def add_resource_to_vector_db(title, link, tags):
+    if vector_collection is None:
+        return
+    try:
+        import time
+        doc_id = f"doc_{int(time.time()*1000)}"
+        vector_collection.add(
+            documents=[f"{title} {tags}"],
+            metadatas=[{"link": link, "title": title}],
+            ids=[doc_id]
+        )
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ Ресурс '{title}' добавлен в векторную БД")
+    except Exception as e:
+        log_error("VectorDBAdd", str(e), traceback.format_exc())

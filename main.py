@@ -6,7 +6,7 @@ from database import (
     get_all_knowledge_base, c, db_lock
 )
 print("database loaded")
-from agents import chat_respond, validate_file
+from agents import chat_respond, validate_file, generate_plan_by_interests 
 from voice import transcribe_audio, text_to_speech, add_chat_message
 from tests import (
     test_questions, start_test, load_question, reset_test, check_answer
@@ -52,6 +52,44 @@ def show_table(table_name):
 with gr.Blocks(title="SkillForge Analyst") as demo:
     gr.Markdown("# 🤖 SkillForge Analyst — AI-наставник системных аналитиков")
     gr.Markdown("Векторный поиск, голосовое общение, тесты, админ-панель с логом ошибок.")
+   
+   
+    # ----- Новая вкладка: Подбор плана по интересам -----
+    with gr.Tab("🎯 Подбор плана по интересам"):
+        gr.Markdown("### Выберите направления, которые вам интересны (можно отметить несколько)")
+        
+        # Список вопросов
+        questions = [
+            "Общение с заказчиками и выявление требований",
+            "Проектирование баз данных и сложные SQL-запросы",
+            "Моделирование бизнес-процессов (BPMN, UML)",
+            "Разработка и документирование REST API",
+            "Архитектура микросервисов и event-driven системы",
+            "Анализ данных и построение отчётов",
+            "Автоматизация тестирования и обеспечение качества",
+            "Управление проектами и командами",
+            "Облачные технологии (AWS, Azure)",
+            "Изучение новых технологий и исследования (R&D)"
+        ]
+        
+        # Чекбокс-группа
+        interests = gr.CheckboxGroup(choices=questions, label="Отметьте интересующие направления")
+        
+        # Кнопка и результат
+        generate_btn = gr.Button("🎯 Подобрать план", variant="primary")
+        output_plan = gr.Markdown(label="Ваш план развития")
+        
+        def generate_plan(selected):
+            if not selected:
+                return "⚠️ Пожалуйста, выберите хотя бы одно направление."
+            # Вызываем функцию из agents
+            from agents import generate_plan_by_interests
+            plan = generate_plan_by_interests(selected, total_questions=len(questions))
+            return plan
+        
+        generate_btn.click(generate_plan, inputs=interests, outputs=output_plan)
+
+
 
     # ----- Чат-тьютор -----
     with gr.Tab("💬 Чат-тьютор"):
